@@ -7,6 +7,7 @@ use i_slint_core::partial_renderer::DirtyRegion;
 use i_slint_core::platform::PlatformError;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use wgpu_28 as wgpu;
@@ -30,6 +31,7 @@ pub struct WGPUSurface {
     surface_config: RefCell<wgpu::SurfaceConfiguration>,
     surface: wgpu::Surface<'static>,
     textures_to_transition_for_sampling: RefCell<Vec<wgpu::Texture>>,
+    texture_image_cache: RefCell<HashMap<wgpu::Texture, skia_safe::Image>>,
     backend: Backend,
 }
 
@@ -84,6 +86,7 @@ impl super::Surface for WGPUSurface {
             surface_config: surface_config.into(),
             surface,
             textures_to_transition_for_sampling: RefCell::new(Vec::new()),
+            texture_image_cache: RefCell::new(HashMap::new()),
             backend,
         })
     }
@@ -108,6 +111,7 @@ impl super::Surface for WGPUSurface {
         surface_config.height = size.height;
 
         self.surface.configure(&self.device, &surface_config);
+        self.texture_image_cache.borrow_mut().clear();
         Ok(())
     }
 
@@ -139,13 +143,15 @@ impl super::Surface for WGPUSurface {
                 })?
             }
         };
-
         let skia_surface = self.backend.make_surface(size, gr_context, &frame);
 
         let mut skia_surface = skia_surface
             .ok_or_else(|| PlatformError::from("Failed to create Skia surface from WGPU"))?;
 
-        callback(skia_surface.canvas(), Some(gr_context), 0);
+        // wgpu doesn't expose EGL_EXT_buffer_age, so assume triple buffering
+        // (worst-case for FIFO/AutoVsync). This enables partial rendering to
+        // union the last 2 frames' dirty regions instead of repainting everything.
+        callback(skia_surface.canvas(), Some(gr_context), 3);
 
         let textures_to_transition = self.textures_to_transition_for_sampling.take();
         if !textures_to_transition.is_empty() {
@@ -210,7 +216,18 @@ impl super::Surface for WGPUSurface {
         // submitting.
         self.textures_to_transition_for_sampling.borrow_mut().push(texture.clone());
 
-        self.backend.import_texture(canvas, texture)
+        // Cache the Skia Image wrapper — import_texture is expensive (creates new
+        // Skia backend texture + Image each call) but the underlying wgpu::Texture
+        // handles don't change between frames (only on resize/reallocation).
+        let cache = self.texture_image_cache.borrow();
+        if let Some(cached) = cache.get(&texture) {
+            return Some(cached.clone());
+        }
+        drop(cache);
+
+        let image = self.backend.import_texture(canvas, texture.clone())?;
+        self.texture_image_cache.borrow_mut().insert(texture, image.clone());
+        Some(image)
     }
 }
 
