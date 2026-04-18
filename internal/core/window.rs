@@ -1098,13 +1098,15 @@ impl WindowInner {
 
     /// Calls the render_components to render the main component and any sub-window components, tracked by a
     /// property dependency tracker.
-    /// Returns None if no component is set yet.
+    /// Returns None if no component is set yet or if no properties have changed since the last draw
+    /// (the redraw tracker is clean). When None is returned, the previous frame's content is still
+    /// valid and the caller can skip GPU work.
     pub fn draw_contents<T>(
         &self,
         render_components: impl FnOnce(&[(ItemTreeWeak, LogicalPoint)]) -> T,
     ) -> Option<T> {
         let component_weak = ItemTreeRc::downgrade(&self.try_component()?);
-        Some(self.pinned_fields.as_ref().project_ref().redraw_tracker.evaluate_as_dependency_root(
+        self.pinned_fields.as_ref().project_ref().redraw_tracker.evaluate_if_dirty(
             || {
                 if !self
                     .active_popups
@@ -1126,7 +1128,7 @@ impl WindowInner {
                     render_components(&item_trees)
                 }
             },
-        ))
+        )
     }
 
     /// Registers the window with the windowing system, in order to render the component's items and react
