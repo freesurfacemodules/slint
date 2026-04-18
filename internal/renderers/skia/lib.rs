@@ -702,13 +702,6 @@ impl SkiaRenderer {
                     buffer_dirty_region,
                 );
 
-                let mut clip_path = skia_safe::Path::new();
-
-                for dirty_rect in partial_renderer.dirty_region.iter() {
-                    let physical_rect = (dirty_rect * scale_factor).to_rect().round_out();
-                    clip_path.add_rect(to_skia_rect(&physical_rect), None);
-                }
-
                 if matches!(self.dirty_region_debug_mode, DirtyRegionDebugMode::Log) {
                     let area_to_repaint: f32 =
                         partial_renderer.dirty_region.iter().map(|b| b.area()).sum();
@@ -722,6 +715,20 @@ impl SkiaRenderer {
 
                 dirty_region_history.rotate_right(1);
                 dirty_region_history[0] = dirty_region_for_this_frame;
+
+                // Nothing to repaint — skip all rendering and return None to
+                // signal the surface to skip the present cycle (previous front
+                // buffer is still valid).
+                if partial_renderer.dirty_region.iter().next().is_none() {
+                    return None;
+                }
+
+                let mut clip_path = skia_safe::Path::new();
+
+                for dirty_rect in partial_renderer.dirty_region.iter() {
+                    let physical_rect = (dirty_rect * scale_factor).to_rect().round_out();
+                    clip_path.add_rect(to_skia_rect(&physical_rect), None);
+                }
 
                 skia_canvas.clip_path(&clip_path, None, false);
 
