@@ -1098,16 +1098,45 @@ impl WindowInner {
 
     /// Calls the render_components to render the main component and any sub-window components, tracked by a
     /// property dependency tracker.
-    /// Returns None if no component is set yet or if no properties have changed since the last draw
-    /// (the redraw tracker is clean). When None is returned, the previous frame's content is still
-    /// valid and the caller can skip GPU work.
+    /// Returns None if no component is set yet, or if no properties have changed since the last draw
+    /// AND no forced dirty regions are pending. When None is returned, the previous frame's content
+    /// is still valid and the caller can skip GPU work.
     pub fn draw_contents<T>(
         &self,
         render_components: impl FnOnce(&[(ItemTreeWeak, LogicalPoint)]) -> T,
     ) -> Option<T> {
         let component_weak = ItemTreeRc::downgrade(&self.try_component()?);
-        self.pinned_fields.as_ref().project_ref().redraw_tracker.evaluate_if_dirty(
-            || {
+        let tracker = self.pinned_fields.as_ref().project_ref().redraw_tracker;
+
+        // Run the render callback if either:
+        // 1. The property-based redraw tracker is dirty (UI state changed), or
+        // 2. The renderer has a forced dirty region (external content changed)
+        let force = self.window_adapter().renderer().has_forced_dirty();
+        if force && !tracker.is_dirty() {
+            // Forced dirty without property changes: run the callback without
+            // re-registering property dependencies (they haven't changed).
+            Some(if !self
+                .active_popups
+                .borrow()
+                .iter()
+                .any(|p| matches!(p.location, PopupWindowLocation::ChildWindow(..)))
+            {
+                render_components(&[(component_weak, LogicalPoint::default())])
+            } else {
+                let borrow = self.active_popups.borrow();
+                let mut item_trees = Vec::with_capacity(borrow.len() + 1);
+                item_trees.push((component_weak, LogicalPoint::default()));
+                for popup in borrow.iter() {
+                    if let PopupWindowLocation::ChildWindow(location) = &popup.location {
+                        item_trees.push((ItemTreeRc::downgrade(&popup.component), *location));
+                    }
+                }
+                drop(borrow);
+                render_components(&item_trees)
+            })
+        } else {
+            // Normal path: evaluate_if_dirty checks the tracker and re-registers deps
+            tracker.evaluate_if_dirty(|| {
                 if !self
                     .active_popups
                     .borrow()
@@ -1127,8 +1156,8 @@ impl WindowInner {
                     drop(borrow);
                     render_components(&item_trees)
                 }
-            },
-        )
+            })
+        }
     }
 
     /// Registers the window with the windowing system, in order to render the component's items and react

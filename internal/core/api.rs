@@ -533,6 +533,25 @@ impl Window {
         self.0.window_adapter().request_redraw()
     }
 
+    /// Mark a region of the window as needing repaint, without affecting the rest of the UI.
+    ///
+    /// Use this when external content (e.g., a shared GPU texture) has changed and the
+    /// corresponding area needs to be re-drawn, but other UI elements remain unchanged.
+    /// This enables partial rendering to confine the repaint to just the specified region.
+    ///
+    /// Coordinates are in logical pixels relative to the window origin.
+    /// Also triggers a redraw request.
+    pub fn mark_region_dirty(&self, x: f32, y: f32, width: f32, height: f32) {
+        use crate::partial_renderer::DirtyRegion;
+        let mut region = DirtyRegion::default();
+        region.add_rect(crate::lengths::LogicalRect::new(
+            crate::lengths::LogicalPoint::new(x, y),
+            crate::lengths::LogicalSize::new(width, height),
+        ));
+        self.0.window_adapter().renderer().mark_dirty_region(region);
+        self.0.window_adapter().request_redraw();
+    }
+
     /// This function returns the scale factor that allows converting between logical and
     /// physical pixels.
     pub fn scale_factor(&self) -> f32 {

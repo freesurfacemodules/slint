@@ -995,6 +995,10 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         }
     }
 
+    fn has_forced_dirty(&self) -> bool {
+        self.partial_rendering_state().is_some_and(|s| s.has_forced_dirty())
+    }
+
     fn supports_transformations(&self) -> bool {
         true
     }

@@ -82,6 +82,10 @@ pub trait RendererSealed {
     /// Example: when a PopupWindow disappears, the region under the popup needs to be redrawn
     fn mark_dirty_region(&self, _region: crate::partial_renderer::DirtyRegion) {}
 
+    /// Returns true if there is a forced dirty region pending that requires rendering
+    /// even if no properties have changed.
+    fn has_forced_dirty(&self) -> bool { false }
+
     #[cfg(feature = "std")] // FIXME: just because of the Error
     /// This function can be used to register a custom TrueType font with Slint,
     /// for use with the `font-family` property. The provided slice must be a valid TrueType

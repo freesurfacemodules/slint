@@ -804,6 +804,11 @@ impl PartialRenderingState {
         self.force_dirty.replace_with(|r| r.union(&region));
     }
 
+    /// Returns true if there is a forced dirty region pending (from mark_dirty_region).
+    pub fn has_forced_dirty(&self) -> bool {
+        self.force_dirty.borrow().iter().next().is_some() || self.force_screen_refresh.get()
+    }
+
     /// Call this from your renderer's `free_graphics_resources` function to ensure that the cached item geometries
     /// are cleared for the destroyed items in the item tree.
     pub fn free_graphics_resources(&self, items: &mut dyn Iterator<Item = Pin<ItemRef<'_>>>) {
