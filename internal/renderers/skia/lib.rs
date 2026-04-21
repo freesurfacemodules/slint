@@ -180,6 +180,9 @@ pub struct SkiaRenderer {
     dirty_region_debug_mode: DirtyRegionDebugMode,
     /// Tracking dirty regions indexed by buffer age - 1. More than 3 back buffers aren't supported, but also unlikely to happen.
     dirty_region_history: RefCell<[DirtyRegion; 3]>,
+    /// When a property-driven repaint occurs, this counter is set to ensure
+    /// all swapchain buffers get the updated content. Decrements each frame.
+    full_repaint_countdown: Cell<u8>,
     shared_context: SkiaSharedContext,
 }
 
@@ -199,6 +202,7 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -233,6 +237,7 @@ impl SkiaRenderer {
             partial_rendering_state: PartialRenderingState::default().into(),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -267,6 +272,7 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -301,6 +307,7 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -335,6 +342,7 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -369,6 +377,7 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -403,6 +412,7 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -436,6 +446,7 @@ impl SkiaRenderer {
             partial_rendering_state: create_partial_renderer_state(None),
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -475,6 +486,7 @@ impl SkiaRenderer {
             partial_rendering_state,
             dirty_region_debug_mode: Default::default(),
             dirty_region_history: Default::default(),
+            full_repaint_countdown: Cell::new(0),
             shared_context: context.clone(),
         }
     }
@@ -578,13 +590,28 @@ impl SkiaRenderer {
 
         // Skip the entire surface render cycle (swapchain acquire + present)
         // when there's nothing to draw: no property changes AND no forced dirty
-        // regions. This avoids presenting stale swapchain buffers that would
-        // show old content in un-repainted areas.
+        // regions AND no pending full-repaint countdown.
         let window_inner = i_slint_core::window::WindowInner::from_pub(window);
         let tracker_dirty = window_inner.is_redraw_tracker_dirty();
         let forced_dirty = self.partial_rendering_state().is_some_and(|s| s.has_forced_dirty());
-        if !tracker_dirty && !forced_dirty {
+        let countdown_active = self.full_repaint_countdown.get() > 0;
+        if !tracker_dirty && !forced_dirty && !countdown_active {
             return Ok(());
+        }
+
+        // When a property-driven repaint occurs, start a countdown to ensure
+        // all swapchain buffers (typically 3) get the updated content.
+        // On forced-dirty-only frames during the countdown, force full-screen.
+        if tracker_dirty {
+            // Property change: start countdown for remaining swapchain buffers
+            self.full_repaint_countdown.set(2); // 2 more frames after this one
+        } else if countdown_active {
+            // Countdown frame: force full-screen repaint to update this buffer
+            let remaining = self.full_repaint_countdown.get() - 1;
+            self.full_repaint_countdown.set(remaining);
+            if let Some(prs) = self.partial_rendering_state() {
+                prs.force_screen_refresh();
+            }
         }
 
         surface.render(
