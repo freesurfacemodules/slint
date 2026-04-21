@@ -1622,6 +1622,11 @@ impl WindowInner {
         &window.0
     }
 
+    /// Check if the redraw tracker has been marked dirty (property changes pending).
+    pub fn is_redraw_tracker_dirty(&self) -> bool {
+        self.pinned_fields.as_ref().project_ref().redraw_tracker.is_dirty()
+    }
+
     /// Provides access to the Windows' Slint context.
     pub fn context(&self) -> &crate::SlintContext {
         &self.ctx

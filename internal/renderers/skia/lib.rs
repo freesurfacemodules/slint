@@ -576,6 +576,17 @@ impl SkiaRenderer {
         let window_adapter = self.window_adapter()?;
         let window = window_adapter.window();
 
+        // Skip the entire surface render cycle (swapchain acquire + present)
+        // when there's nothing to draw: no property changes AND no forced dirty
+        // regions. This avoids presenting stale swapchain buffers that would
+        // show old content in un-repainted areas.
+        let window_inner = i_slint_core::window::WindowInner::from_pub(window);
+        let tracker_dirty = window_inner.is_redraw_tracker_dirty();
+        let forced_dirty = self.partial_rendering_state().is_some_and(|s| s.has_forced_dirty());
+        if !tracker_dirty && !forced_dirty {
+            return Ok(());
+        }
+
         surface.render(
             window,
             surface_size,

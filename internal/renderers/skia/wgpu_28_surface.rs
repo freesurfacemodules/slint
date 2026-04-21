@@ -151,18 +151,7 @@ impl super::Surface for WGPUSurface {
         // wgpu doesn't expose EGL_EXT_buffer_age, so assume triple buffering
         // (worst-case for FIFO/AutoVsync). This enables partial rendering to
         // union the last 2 frames' dirty regions instead of repainting everything.
-        let dirty_region = callback(skia_surface.canvas(), Some(gr_context), 3);
-
-        // When the callback returns None, nothing was drawn — skip the Skia
-        // GPU flush and texture transitions. We still must present the frame
-        // to return the swapchain texture to the pool (dropping without present
-        // exhausts the swapchain after a few frames).
-        if dirty_region.is_none() {
-            drop(skia_surface);
-            gr_context.submit(None);
-            frame.present();
-            return Ok(());
-        }
+        callback(skia_surface.canvas(), Some(gr_context), 3);
 
         let textures_to_transition = self.textures_to_transition_for_sampling.take();
         if !textures_to_transition.is_empty() {
