@@ -404,6 +404,10 @@ impl super::Surface for WGPUSurface {
         !self.viewport_blits.borrow().is_empty()
     }
 
+    fn get_viewport_blit_rects(&self) -> Vec<[f32; 4]> {
+        self.viewport_blits.borrow().iter().map(|b| b.rect).collect()
+    }
+
     /// Blit-only render: acquire swapchain, blit viewports onto the existing
     /// buffer content (which retains valid UI from the last full paint), present.
     /// No Skia, no component tree, no dirty evaluation.

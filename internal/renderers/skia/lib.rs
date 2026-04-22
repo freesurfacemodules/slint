@@ -818,15 +818,39 @@ impl SkiaRenderer {
                 }
             }
 
-            // Viewport blit: render external textures as an underlay, after the
-            // background clear but before component rendering. This ensures Slint's
-            // UI elements (bounding boxes, handles, overlays) render ON TOP.
+            // Viewport blit: render external textures as an underlay.
+            // Then clip-out the viewport rects from component rendering so
+            // Slint's opaque backgrounds don't cover the blits.
             #[cfg(feature = "unstable-wgpu-28")]
-            if let Some(surface) = surface {
-                if let Some(ctx) = gr_context.as_mut() {
-                    ctx.flush(None); // commit any pending Skia ops before our render pass
+            let has_blits = surface.is_some_and(|s| s.has_viewport_blits());
+            #[cfg(not(feature = "unstable-wgpu-28"))]
+            let has_blits = false;
+
+            #[cfg(feature = "unstable-wgpu-28")]
+            if has_blits {
+                if let Some(surface) = surface {
+                    if let Some(ctx) = gr_context.as_mut() {
+                        ctx.flush(None);
+                    }
+                    surface.execute_viewport_blits();
                 }
-                surface.execute_viewport_blits();
+            }
+
+            // Pass 1: render components with viewport rects clipped OUT.
+            // This draws all UI (backgrounds, text, controls) but skips the
+            // viewport regions, preserving the blit content.
+            if has_blits {
+                if let Some(surface) = surface {
+                    skia_canvas.save();
+                    let blit_rects = surface.get_viewport_blit_rects();
+                    for r in &blit_rects {
+                        skia_canvas.clip_rect(
+                            skia_safe::Rect::from_xywh(r[0], r[1], r[2], r[3]),
+                            skia_safe::ClipOp::Difference,
+                            false,
+                        );
+                    }
+                }
             }
 
             for (component, origin) in components {
@@ -837,6 +861,35 @@ impl SkiaRenderer {
                         *origin,
                         &window_adapter,
                     );
+                }
+            }
+
+            // Pass 2: re-render ONLY the viewport regions without the clip-out.
+            // This draws bounding boxes and overlay elements ON TOP of the blit.
+            if has_blits {
+                if let Some(surface) = surface {
+                    skia_canvas.restore();
+                    // Clip to ONLY the viewport rects for the overlay pass
+                    let blit_rects = surface.get_viewport_blit_rects();
+                    let mut overlay_clip = skia_safe::Path::new();
+                    for r in &blit_rects {
+                        overlay_clip.add_rect(
+                            skia_safe::Rect::from_xywh(r[0], r[1], r[2], r[3]),
+                            None,
+                        );
+                    }
+                    skia_canvas.clip_path(&overlay_clip, None, false);
+
+                    for (component, origin) in components {
+                        if let Some(component) = ItemTreeWeak::upgrade(component) {
+                            i_slint_core::item_rendering::render_component_items(
+                                &component,
+                                item_renderer,
+                                *origin,
+                                &window_adapter,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -1164,6 +1217,10 @@ pub trait Surface {
     /// Returns true if viewport blits are registered.
     #[cfg(feature = "unstable-wgpu-28")]
     fn has_viewport_blits(&self) -> bool { false }
+
+    /// Get the physical-pixel rects of registered viewport blits.
+    #[cfg(feature = "unstable-wgpu-28")]
+    fn get_viewport_blit_rects(&self) -> Vec<[f32; 4]> { vec![] }
 
     /// Blit-only render: acquire swapchain, blit viewports onto existing buffer
     /// content, present. Bypasses Skia entirely — used when no UI changes are
