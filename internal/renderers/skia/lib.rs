@@ -604,7 +604,7 @@ impl SkiaRenderer {
         // On forced-dirty-only frames during the countdown, force full-screen.
         if tracker_dirty {
             // Property change: start countdown for remaining swapchain buffers
-            self.full_repaint_countdown.set(2); // 2 more frames after this one
+            self.full_repaint_countdown.set(3); // ensure all buffers get updated
         } else if countdown_active {
             // Countdown frame: force full-screen repaint to update this buffer
             let remaining = self.full_repaint_countdown.get() - 1;
@@ -992,10 +992,15 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         }
 
         if let Some(surface) = self.surface.borrow().as_ref() {
-            surface.resize_event(size)
-        } else {
-            Ok(())
+            surface.resize_event(size)?;
         }
+        // Resize reconfigures the swapchain, invalidating all buffers.
+        // Force full-screen repaint for the next 3 frames to ensure all
+        // new swapchain buffers get correct content.
+        self.full_repaint_countdown.set(3);
+        // Clear dirty history — old regions from the previous size are invalid.
+        *self.dirty_region_history.borrow_mut() = Default::default();
+        Ok(())
     }
 
     /// Returns an image buffer of what was rendered last by reading the previous front buffer (using glReadPixels).
