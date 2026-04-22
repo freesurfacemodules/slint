@@ -552,6 +552,20 @@ impl Window {
         self.0.window_adapter().request_redraw();
     }
 
+    /// Set external viewport textures to blit directly onto the window surface
+    /// after Slint's rendering, before present. This bypasses the Image element
+    /// and Skia renderer entirely for these textures.
+    ///
+    /// The blits parameter is type-erased; for wgpu28 backends, pass a
+    /// `Vec<ViewportBlit>` boxed as `Box<dyn Any>`.
+    ///
+    /// Call this once to register the blit targets; they persist until replaced.
+    /// Also triggers a redraw request.
+    pub fn set_viewport_blits(&self, blits: Box<dyn std::any::Any>) {
+        self.0.window_adapter().renderer().set_viewport_blits(blits);
+        self.0.window_adapter().request_redraw();
+    }
+
     /// This function returns the scale factor that allows converting between logical and
     /// physical pixels.
     pub fn scale_factor(&self) -> f32 {

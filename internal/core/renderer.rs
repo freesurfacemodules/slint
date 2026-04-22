@@ -86,6 +86,10 @@ pub trait RendererSealed {
     /// even if no properties have changed.
     fn has_forced_dirty(&self) -> bool { false }
 
+    /// Set external viewport textures to blit onto the swapchain surface after
+    /// Slint's rendering. The data is type-erased; the renderer downcasts it.
+    fn set_viewport_blits(&self, _blits: Box<dyn std::any::Any>) {}
+
     #[cfg(feature = "std")] // FIXME: just because of the Error
     /// This function can be used to register a custom TrueType font with Slint,
     /// for use with the `font-family` property. The provided slice must be a valid TrueType

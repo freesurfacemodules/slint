@@ -61,7 +61,7 @@ pub mod opengl_surface;
 #[cfg(feature = "unstable-wgpu-27")]
 mod wgpu_27_surface;
 #[cfg(feature = "unstable-wgpu-28")]
-mod wgpu_28_surface;
+pub mod wgpu_28_surface;
 
 use i_slint_core::items::{ItemRc, TextWrap};
 use itemrenderer::to_skia_rect;
@@ -1042,6 +1042,15 @@ impl i_slint_core::renderer::RendererSealed for SkiaRenderer {
         self.partial_rendering_state().is_some_and(|s| s.has_forced_dirty())
     }
 
+    #[cfg(feature = "unstable-wgpu-28")]
+    fn set_viewport_blits(&self, blits: Box<dyn std::any::Any>) {
+        if let Ok(blits) = blits.downcast::<Vec<wgpu_28_surface::ViewportBlit>>() {
+            if let Some(surface) = self.surface.borrow().as_ref() {
+                surface.set_viewport_blits(*blits);
+            }
+        }
+    }
+
     fn supports_transformations(&self) -> bool {
         true
     }
@@ -1120,6 +1129,12 @@ pub trait Surface {
     ) -> Option<skia_safe::Image> {
         None
     }
+
+    /// Set the list of external viewport textures to blit onto the swapchain
+    /// surface after Slint's rendering, before present. Each entry specifies
+    /// a texture and a physical-pixel rectangle.
+    #[cfg(feature = "unstable-wgpu-28")]
+    fn set_viewport_blits(&self, _blits: Vec<wgpu_28_surface::ViewportBlit>) {}
 
     /// Implementations should return self to allow upcasting.
     fn as_any(&self) -> &dyn core::any::Any {
