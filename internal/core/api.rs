@@ -552,6 +552,14 @@ impl Window {
         self.0.window_adapter().request_redraw();
     }
 
+    /// Convert a logical-pixel rectangle (x, y, width, height) to physical pixels
+    /// using the window's current scale factor. Returns [x, y, w, h] as f32 in
+    /// physical pixel coordinates, using the same arithmetic Slint uses internally.
+    pub fn logical_rect_to_physical(&self, x: f32, y: f32, width: f32, height: f32) -> [f32; 4] {
+        let sf = self.0.scale_factor();
+        [x * sf, y * sf, width * sf, height * sf]
+    }
+
     /// Set external viewport textures to blit directly onto the window surface
     /// after Slint's rendering, before present. This bypasses the Image element
     /// and Skia renderer entirely for these textures.
