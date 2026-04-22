@@ -190,6 +190,8 @@ pub struct WGPUSurface {
     viewport_blits: RefCell<Vec<ViewportBlit>>,
     /// Lazily-initialized blit pipeline.
     blit_pipeline: RefCell<Option<BlitPipeline>>,
+    /// Temporary reference to the current swapchain frame view, set during render().
+    current_frame_view: RefCell<Option<wgpu::TextureView>>,
     backend: Backend,
 }
 
@@ -247,6 +249,7 @@ impl super::Surface for WGPUSurface {
             texture_image_cache: RefCell::new(HashMap::new()),
             viewport_blits: RefCell::new(Vec::new()),
             blit_pipeline: RefCell::new(None),
+            current_frame_view: RefCell::new(None),
             backend,
         })
     }
@@ -303,6 +306,12 @@ impl super::Surface for WGPUSurface {
                 })?
             }
         };
+        // Store the frame view for viewport blits (used by execute_viewport_blits
+        // which is called from inside the callback via render_components_to_canvas).
+        *self.current_frame_view.borrow_mut() = Some(
+            frame.texture.create_view(&wgpu::TextureViewDescriptor::default())
+        );
+
         let skia_surface = self.backend.make_surface(size, gr_context, &frame);
 
         let mut skia_surface = skia_surface
@@ -332,78 +341,8 @@ impl super::Surface for WGPUSurface {
 
         gr_context.submit(None);
 
-        // Blit external viewport textures directly onto the swapchain surface.
-        // This bypasses Slint's Image element and Skia entirely.
-        {
-            let blits = self.viewport_blits.borrow();
-            if !blits.is_empty() {
-                let surface_format = self.surface_config.borrow().format;
-                let mut bp = self.blit_pipeline.borrow_mut();
-                let pipeline = bp.get_or_insert_with(|| BlitPipeline::new(&self.device, surface_format));
-
-                let surface_w = self.surface_config.borrow().width as f32;
-                let surface_h = self.surface_config.borrow().height as f32;
-
-                let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Viewport Blit Encoder"),
-                });
-
-                for blit in blits.iter() {
-                    // Convert pixel rect to NDC: x,y → [-1,1], y flipped
-                    let ndc_x = blit.rect[0] / surface_w * 2.0 - 1.0;
-                    let ndc_y = 1.0 - (blit.rect[1] + blit.rect[3]) / surface_h * 2.0;
-                    let ndc_w = blit.rect[2] / surface_w * 2.0;
-                    let ndc_h = blit.rect[3] / surface_h * 2.0;
-
-                    let uniform_data: [f32; 4] = [ndc_x, ndc_y, ndc_w, ndc_h];
-                    self.queue.write_buffer(
-                        &pipeline.uniform_buffer,
-                        0,
-                        bytemuck::cast_slice(&uniform_data),
-                    );
-
-                    let tex_view = blit.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Viewport Blit BG"),
-                        layout: &pipeline.bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: pipeline.uniform_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(&tex_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
-                            },
-                        ],
-                    });
-
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Viewport Blit Pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &frame_view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,  // preserve Skia's rendering
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        ..Default::default()
-                    });
-                    pass.set_pipeline(&pipeline.pipeline);
-                    pass.set_bind_group(0, &bind_group, &[]);
-                    pass.draw(0..4, 0..1);
-                }
-
-                self.queue.submit(Some(encoder.finish()));
-            }
-        }
+        // Clear temporary frame view reference
+        *self.current_frame_view.borrow_mut() = None;
 
         if let Some(pre_present_callback) = pre_present_callback.borrow_mut().as_mut() {
             pre_present_callback();
@@ -465,6 +404,78 @@ impl super::Surface for WGPUSurface {
 
     fn set_viewport_blits(&self, blits: Vec<ViewportBlit>) {
         *self.viewport_blits.borrow_mut() = blits;
+    }
+
+    fn execute_viewport_blits(&self) {
+        let blits = self.viewport_blits.borrow();
+        let frame_view_ref = self.current_frame_view.borrow();
+        let Some(frame_view) = frame_view_ref.as_ref() else { return };
+        if blits.is_empty() { return; }
+
+        let surface_format = self.surface_config.borrow().format;
+        let mut bp = self.blit_pipeline.borrow_mut();
+        let pipeline = bp.get_or_insert_with(|| BlitPipeline::new(&self.device, surface_format));
+
+        let surface_w = self.surface_config.borrow().width as f32;
+        let surface_h = self.surface_config.borrow().height as f32;
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Viewport Blit Encoder"),
+        });
+
+        for blit in blits.iter() {
+            // Convert pixel rect to NDC: x,y → [-1,1], y flipped
+            let ndc_x = blit.rect[0] / surface_w * 2.0 - 1.0;
+            let ndc_y = 1.0 - (blit.rect[1] + blit.rect[3]) / surface_h * 2.0;
+            let ndc_w = blit.rect[2] / surface_w * 2.0;
+            let ndc_h = blit.rect[3] / surface_h * 2.0;
+
+            let uniform_data: [f32; 4] = [ndc_x, ndc_y, ndc_w, ndc_h];
+            self.queue.write_buffer(
+                &pipeline.uniform_buffer,
+                0,
+                bytemuck::cast_slice(&uniform_data),
+            );
+
+            let tex_view = blit.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Viewport Blit BG"),
+                layout: &pipeline.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: pipeline.uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&tex_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                    },
+                ],
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Viewport Blit Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: frame_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..4, 0..1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
     }
 }
 

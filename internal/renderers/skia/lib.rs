@@ -810,6 +810,17 @@ impl SkiaRenderer {
                 }
             }
 
+            // Viewport blit: render external textures as an underlay, after the
+            // background clear but before component rendering. This ensures Slint's
+            // UI elements (bounding boxes, handles, overlays) render ON TOP.
+            #[cfg(feature = "unstable-wgpu-28")]
+            if let Some(surface) = surface {
+                if let Some(ctx) = gr_context.as_mut() {
+                    ctx.flush(None); // commit any pending Skia ops before our render pass
+                }
+                surface.execute_viewport_blits();
+            }
+
             for (component, origin) in components {
                 if let Some(component) = ItemTreeWeak::upgrade(component) {
                     i_slint_core::item_rendering::render_component_items(
@@ -1135,6 +1146,12 @@ pub trait Surface {
     /// a texture and a physical-pixel rectangle.
     #[cfg(feature = "unstable-wgpu-28")]
     fn set_viewport_blits(&self, _blits: Vec<wgpu_28_surface::ViewportBlit>) {}
+
+    /// Execute the registered viewport blits onto the current swapchain frame.
+    /// Called from render_components_to_canvas between background clear and
+    /// component rendering (underlay position).
+    #[cfg(feature = "unstable-wgpu-28")]
+    fn execute_viewport_blits(&self) {}
 
     /// Implementations should return self to allow upcasting.
     fn as_any(&self) -> &dyn core::any::Any {
