@@ -406,6 +406,47 @@ impl super::Surface for WGPUSurface {
         *self.viewport_blits.borrow_mut() = blits;
     }
 
+    fn has_viewport_blits(&self) -> bool {
+        !self.viewport_blits.borrow().is_empty()
+    }
+
+    /// Blit-only render: acquire swapchain, blit viewports onto the existing
+    /// buffer content (which retains valid UI from the last full paint), present.
+    /// No Skia, no component tree, no dirty evaluation.
+    fn render_blits_only(&self) -> Result<(), PlatformError> {
+        if self.viewport_blits.borrow().is_empty() {
+            return Ok(());
+        }
+
+        let gr_context = &mut self.gr_context.borrow_mut();
+        let frame = match self.surface.get_current_texture() {
+            Ok(texture) => texture,
+            Err(wgpu::SurfaceError::Timeout) => {
+                self.surface.get_current_texture().map_err(|e| {
+                    format!("Error obtaining surface texture for blit-only: {e}")
+                })?
+            }
+            Err(_) => {
+                self.surface.configure(&self.device, &*self.surface_config.borrow());
+                self.surface.get_current_texture().map_err(|e| {
+                    format!("Error obtaining surface texture for blit-only after reconfig: {e}")
+                })?
+            }
+        };
+
+        *self.current_frame_view.borrow_mut() = Some(
+            frame.texture.create_view(&wgpu::TextureViewDescriptor::default())
+        );
+
+        self.execute_viewport_blits();
+
+        *self.current_frame_view.borrow_mut() = None;
+        gr_context.submit(None);
+        frame.present();
+
+        Ok(())
+    }
+
     fn execute_viewport_blits(&self) {
         let blits = self.viewport_blits.borrow();
         let frame_view_ref = self.current_frame_view.borrow();

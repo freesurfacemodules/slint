@@ -596,6 +596,14 @@ impl SkiaRenderer {
         let forced_dirty = self.partial_rendering_state().is_some_and(|s| s.has_forced_dirty());
         let countdown_active = self.full_repaint_countdown.get() > 0;
         if !tracker_dirty && !forced_dirty && !countdown_active {
+            // No UI changes pending. If viewport blits are registered,
+            // do a blit-only render: acquire swapchain, blit viewports
+            // onto the existing buffer (which has valid UI from last paint),
+            // present. Bypasses Skia entirely.
+            #[cfg(feature = "unstable-wgpu-28")]
+            if surface.has_viewport_blits() {
+                return surface.render_blits_only();
+            }
             return Ok(());
         }
 
@@ -1152,6 +1160,16 @@ pub trait Surface {
     /// component rendering (underlay position).
     #[cfg(feature = "unstable-wgpu-28")]
     fn execute_viewport_blits(&self) {}
+
+    /// Returns true if viewport blits are registered.
+    #[cfg(feature = "unstable-wgpu-28")]
+    fn has_viewport_blits(&self) -> bool { false }
+
+    /// Blit-only render: acquire swapchain, blit viewports onto existing buffer
+    /// content, present. Bypasses Skia entirely — used when no UI changes are
+    /// pending but viewport textures need updating.
+    #[cfg(feature = "unstable-wgpu-28")]
+    fn render_blits_only(&self) -> Result<(), PlatformError> { Ok(()) }
 
     /// Implementations should return self to allow upcasting.
     fn as_any(&self) -> &dyn core::any::Any {
