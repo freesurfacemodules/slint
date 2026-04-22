@@ -12,6 +12,15 @@ use alloc::boxed::Box;
 
 pub use wgpu_28 as wgpu;
 
+/// A viewport region to blit directly onto the window surface.
+/// Used with `Window::set_viewport_blits` to bypass the Image element.
+pub struct ViewportBlit {
+    /// The external texture to sample from.
+    pub texture: wgpu::Texture,
+    /// Viewport rectangle in physical pixels [x, y, width, height].
+    pub rect: [f32; 4],
+}
+
 pub mod api {
     /*!
     This module contains types that are public and re-exported in the slint-rs as well as the slint-interpreter crate as public API.

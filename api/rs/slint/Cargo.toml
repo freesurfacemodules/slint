@@ -226,6 +226,7 @@ unstable-wgpu-28 = [
   "i-slint-core/unstable-wgpu-28",
   "i-slint-backend-selector/unstable-wgpu-28",
   "i-slint-backend-android-activity?/unstable-wgpu-28",
+  "i-slint-renderer-skia/unstable-wgpu-28",
   "dep:wgpu-28",
 ]
 

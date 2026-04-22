@@ -643,8 +643,7 @@ pub mod wgpu_28 {
 
     /// A viewport blit target: an external texture + physical-pixel rect to render
     /// directly onto the window surface, bypassing Slint's Image element.
-    #[cfg(feature = "renderer-skia")]
-    pub use i_slint_renderer_skia::wgpu_28_surface::ViewportBlit;
+    pub use i_slint_core::graphics::wgpu_28::ViewportBlit;
 }
 
 #[cfg(feature = "unstable-winit-030")]

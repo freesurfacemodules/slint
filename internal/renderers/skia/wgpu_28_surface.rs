@@ -26,13 +26,7 @@ mod vulkan;
 // surface, bypassing Slint's Image element and Skia renderer entirely.
 // ---------------------------------------------------------------------------
 
-/// A viewport region to blit onto the swapchain surface.
-pub struct ViewportBlit {
-    /// The external texture to sample from.
-    pub texture: wgpu::Texture,
-    /// Viewport rectangle in physical pixels (x, y, width, height).
-    pub rect: [f32; 4],
-}
+pub use i_slint_core::graphics::wgpu_28::ViewportBlit;
 
 /// WGSL shader for viewport blit: renders a textured quad at a given position.
 const BLIT_SHADER: &str = r#"
