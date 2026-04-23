@@ -451,9 +451,6 @@ impl super::Surface for WGPUSurface {
     }
 
     fn execute_viewport_blits(&self) {
-        // DIAGNOSTIC: early return to test if the blit submit causes the black screen
-        return;
-
         let blits = self.viewport_blits.borrow();
         let frame_view_ref = self.current_frame_view.borrow();
         let Some(frame_view) = frame_view_ref.as_ref() else { return };
@@ -513,6 +510,8 @@ impl super::Surface for WGPUSurface {
                 ],
             });
 
+            // DIAGNOSTIC: Use Clear with magenta to test if the render pass works at all.
+            // If we see magenta rects, the pass works but the texture sampling is broken.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Viewport Blit Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -520,15 +519,16 @@ impl super::Surface for WGPUSurface {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 1.0, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..4, 0..1);
+            // Skip the actual draw — just clear to magenta
+            // pass.set_pipeline(&pipeline.pipeline);
+            // pass.set_bind_group(0, &bind_group, &[]);
+            // pass.draw(0..4, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));
