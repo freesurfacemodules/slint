@@ -335,6 +335,11 @@ impl super::Surface for WGPUSurface {
 
         gr_context.submit(None);
 
+        // Viewport blit: render external textures as overlay AFTER Skia
+        // has finished all rendering. This ensures the blit isn't
+        // overwritten by Skia's internal render pass management.
+        self.execute_viewport_blits();
+
         // Clear temporary frame view reference
         *self.current_frame_view.borrow_mut() = None;
 
@@ -462,12 +467,21 @@ impl super::Surface for WGPUSurface {
             label: Some("Viewport Blit Encoder"),
         });
 
+        static BLIT_LOG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         for blit in blits.iter() {
             // Convert pixel rect to NDC: x,y → [-1,1], y flipped
             let ndc_x = blit.rect[0] / surface_w * 2.0 - 1.0;
             let ndc_y = 1.0 - (blit.rect[1] + blit.rect[3]) / surface_h * 2.0;
             let ndc_w = blit.rect[2] / surface_w * 2.0;
             let ndc_h = blit.rect[3] / surface_h * 2.0;
+
+            let count = BLIT_LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count < 5 || count % 300 == 0 {
+                eprintln!("BLIT[{}]: rect={:?} surface={}x{} ndc=({:.3},{:.3},{:.3},{:.3}) tex={}x{} fmt={:?}",
+                    count, blit.rect, surface_w, surface_h, ndc_x, ndc_y, ndc_w, ndc_h,
+                    blit.texture.width(), blit.texture.height(), surface_format);
+            }
 
             let uniform_data: [f32; 4] = [ndc_x, ndc_y, ndc_w, ndc_h];
             self.queue.write_buffer(
