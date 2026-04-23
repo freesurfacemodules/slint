@@ -451,6 +451,9 @@ impl super::Surface for WGPUSurface {
     }
 
     fn execute_viewport_blits(&self) {
+        // DIAGNOSTIC: early return to test if the blit submit causes the black screen
+        return;
+
         let blits = self.viewport_blits.borrow();
         let frame_view_ref = self.current_frame_view.borrow();
         let Some(frame_view) = frame_view_ref.as_ref() else { return };
