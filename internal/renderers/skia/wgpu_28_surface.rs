@@ -36,6 +36,10 @@ pub struct WGPUSurface {
     /// gsplit: GSPLIT_UI_PERF=1 aggregate instrumentation (see ui-render-
     /// decoupling-strategy.md Stage 0).
     ui_perf: RefCell<Option<UiPerf>>,
+    /// gsplit: frames rendered since the last surface (re)configure. Freshly
+    /// configured swapchains contain garbage; partial rendering must see
+    /// buffer age 0 (= full repaint) until the whole buffer chain was painted.
+    frames_since_configure: std::cell::Cell<u32>,
 }
 
 /// gsplit Stage-0 measurement: per-second aggregates of Skia draw time and
@@ -160,6 +164,7 @@ impl super::Surface for WGPUSurface {
             texture_image_cache: RefCell::new(HashMap::new()),
             backend,
             ui_perf: RefCell::new(UiPerf::new_if_enabled()),
+            frames_since_configure: std::cell::Cell::new(0),
         })
     }
 
@@ -168,6 +173,17 @@ impl super::Surface for WGPUSurface {
     }
 
     fn resize_event(&self, size: PhysicalWindowSize) -> Result<(), PlatformError> {
+        {
+            // gsplit: skip same-size reconfigures. Wayland delivers a final
+            // configure on resize-mouseup at the unchanged size; reconfiguring
+            // would replace the swapchain with garbage buffers while the UI has
+            // no damage — under partial rendering only the few dirty items got
+            // painted onto the garbage (the magenta-window-on-mouseup bug).
+            let surface_config = self.surface_config.borrow();
+            if surface_config.width == size.width && surface_config.height == size.height {
+                return Ok(());
+            }
+        }
         {
             let gr_context = &mut self.gr_context.borrow_mut();
             // This is brute force, but for the lack of access to the fences this seems to work: Avoid any pending work so that
@@ -184,6 +200,9 @@ impl super::Surface for WGPUSurface {
 
         self.surface.configure(&self.device, &surface_config);
         self.texture_image_cache.borrow_mut().clear();
+        // New swapchain = garbage buffers: report buffer age 0 (full repaint)
+        // until every buffer in the assumed-triple-buffered chain was painted.
+        self.frames_since_configure.set(0);
         Ok(())
     }
 
@@ -210,6 +229,8 @@ impl super::Surface for WGPUSurface {
             // Outdated or lost: re-configure and try again
             Err(_) => {
                 self.surface.configure(&self.device, &*self.surface_config.borrow());
+                // gsplit: fresh swapchain — see frames_since_configure.
+                self.frames_since_configure.set(0);
                 self.surface.get_current_texture().map_err(|e| {
                     format!("Error obtaining current surface texture after initial error: {e}")
                 })?
@@ -223,8 +244,14 @@ impl super::Surface for WGPUSurface {
         // wgpu doesn't expose EGL_EXT_buffer_age, so assume triple buffering
         // (worst-case for FIFO/AutoVsync). This enables partial rendering to
         // union the last 2 frames' dirty regions instead of repainting everything.
+        // gsplit: EXCEPT right after a (re)configure — new swapchain buffers
+        // hold garbage, so report age 0 (full repaint) until the whole chain
+        // was painted once (the magenta-on-resize-mouseup bug).
+        let fsc = self.frames_since_configure.get();
+        let age = if fsc >= 3 { 3 } else { 0 };
+        self.frames_since_configure.set(fsc.saturating_add(1));
         let draw_start = std::time::Instant::now();
-        let dirty = callback(skia_surface.canvas(), Some(gr_context), 3);
+        let dirty = callback(skia_surface.canvas(), Some(gr_context), age);
         if let Some(perf) = self.ui_perf.borrow_mut().as_mut() {
             perf.record(draw_start.elapsed().as_micros() as u64, &dirty);
         }
