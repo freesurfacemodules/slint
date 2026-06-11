@@ -179,7 +179,9 @@ pub struct SkiaRenderer {
     partial_rendering_state: Option<PartialRenderingState>,
     dirty_region_debug_mode: DirtyRegionDebugMode,
     /// Tracking dirty regions indexed by buffer age - 1. More than 3 back buffers aren't supported, but also unlikely to happen.
-    dirty_region_history: RefCell<[DirtyRegion; 3]>,
+    // gsplit: 5 entries (was 3) so back_buffer_age=4 keeps partial rendering
+    // (the union path requires age-1 < len, else it falls back to full repaint).
+    dirty_region_history: RefCell<[DirtyRegion; 5]>,
     shared_context: SkiaSharedContext,
 }
 

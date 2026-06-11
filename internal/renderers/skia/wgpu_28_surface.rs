@@ -143,6 +143,12 @@ impl super::Surface for WGPUSurface {
             .copied()
             .unwrap_or_else(|| swapchain_capabilities.formats[0]);
         surface_config.format = swapchain_format;
+        // gsplit: configure the INITIAL swapchain identically to resize_event's
+        // reconfigure. The default config produced a different buffer chain than
+        // the post-resize one — under partial rendering the startup chain showed
+        // stale-frame flicker on hover-after-UI-change, which permanently
+        // disappeared after the first resize (= first AutoVsync reconfigure).
+        surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &surface_config);
 
         let backend: Backend = adapter.get_info().backend.try_into()?;
@@ -241,14 +247,17 @@ impl super::Surface for WGPUSurface {
         let mut skia_surface = skia_surface
             .ok_or_else(|| PlatformError::from("Failed to create Skia surface from WGPU"))?;
 
-        // wgpu doesn't expose EGL_EXT_buffer_age, so assume triple buffering
-        // (worst-case for FIFO/AutoVsync). This enables partial rendering to
-        // union the last 2 frames' dirty regions instead of repainting everything.
+        // wgpu doesn't expose EGL_EXT_buffer_age, so assume QUADRUPLE buffering:
+        // Mesa's Wayland WSI is free to allocate 4 images for FIFO chains, and
+        // age=3 under-repainted on such chains (stale-frame flicker on hover
+        // after a UI change). Age 4 unions the last 3 frames' dirty regions —
+        // a superset of what any chain up to 4 buffers needs; requires the
+        // enlarged dirty_region_history in lib.rs.
         // gsplit: EXCEPT right after a (re)configure — new swapchain buffers
         // hold garbage, so report age 0 (full repaint) until the whole chain
         // was painted once (the magenta-on-resize-mouseup bug).
         let fsc = self.frames_since_configure.get();
-        let age = if fsc >= 3 { 3 } else { 0 };
+        let age = if fsc >= 4 { 4 } else { 0 };
         self.frames_since_configure.set(fsc.saturating_add(1));
         let draw_start = std::time::Instant::now();
         let dirty = callback(skia_surface.canvas(), Some(gr_context), age);
