@@ -1059,3 +1059,29 @@ fn test_window_accessor_and_rwh() {
 
     slint::run_event_loop().unwrap();
 }
+
+/// gsplit Stage 2 (ui-render-decoupling): invoke `callback` with the Skia
+/// renderer backing the given window, for per-window compose-hook
+/// registration (`SkiaRenderer::set_wgpu_compose_hook`). Returns None if the
+/// window isn't winit-backed, isn't shown yet, or doesn't use the Skia
+/// renderer. Register AFTER `show()` — the surface exists only then.
+#[cfg(feature = "renderer-skia")]
+pub fn with_skia_renderer<T>(
+    window: &i_slint_core::api::Window,
+    callback: impl FnOnce(&i_slint_renderer_skia::SkiaRenderer) -> T,
+) -> Option<T> {
+    i_slint_core::window::WindowInner::from_pub(window)
+        .window_adapter()
+        .internal(i_slint_core::InternalToken)
+        .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
+        .and_then(|adapter| {
+            let r: &dyn std::any::Any = adapter.renderer();
+            r.downcast_ref::<renderer::skia::WinitSkiaRenderer>()
+        })
+        .map(|r| callback(r.skia_renderer()))
+}
+
+/// gsplit Stage 2: compose-hook types, re-exported for the app (the slint api
+/// crate doesn't depend on the skia renderer directly).
+#[cfg(all(feature = "renderer-skia", feature = "unstable-wgpu-28"))]
+pub use i_slint_renderer_skia::{ComposeCtx, ComposeHook};

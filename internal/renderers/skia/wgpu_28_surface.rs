@@ -40,6 +40,39 @@ pub struct WGPUSurface {
     /// configured swapchains contain garbage; partial rendering must see
     /// buffer age 0 (= full repaint) until the whole buffer chain was painted.
     frames_since_configure: std::cell::Cell<u32>,
+    /// gsplit Stage 2 (ui-render-decoupling): when set, this window is in
+    /// INVERTED mode — Slint's UI renders only into a small offscreen surface
+    /// (to retire damage; the app hides the UI for inverted windows), and the
+    /// hook composes the window content into the swapchain instead of Skia.
+    compose_hook: RefCell<Option<ComposeHook>>,
+    /// Offscreen Skia target for retiring UI damage in inverted mode.
+    inverted_ui_surface: RefCell<Option<(skia_safe::Surface, (u32, u32))>>,
+}
+
+/// gsplit: everything the app's compose pass needs to draw one frame of an
+/// inverted window into the swapchain. The hook encodes + submits its own
+/// command buffer(s); the surface presents afterwards.
+pub struct ComposeCtx<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    /// Swapchain texture view to render into.
+    pub target: &'a wgpu::TextureView,
+    pub format: wgpu::TextureFormat,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// gsplit: per-window compose callback (see [`ComposeCtx`]).
+pub type ComposeHook = Box<dyn FnMut(&ComposeCtx<'_>)>;
+
+impl WGPUSurface {
+    /// gsplit Stage 2: install/remove the compose hook (inverted mode).
+    pub fn set_compose_hook(&self, hook: Option<ComposeHook>) {
+        if hook.is_none() {
+            self.inverted_ui_surface.borrow_mut().take();
+        }
+        *self.compose_hook.borrow_mut() = hook;
+    }
 }
 
 /// gsplit Stage-0 measurement: per-second aggregates of Skia draw time and
@@ -70,7 +103,7 @@ impl UiPerf {
         })
     }
 
-    fn record(&mut self, draw_us: u64, dirty: &Option<DirtyRegion>) {
+    fn record(&mut self, draw_us: u64, dirty: &Option<DirtyRegion>, size: (u32, u32)) {
         self.frames += 1;
         self.draw_us_sum += draw_us;
         self.draw_us_max = self.draw_us_max.max(draw_us);
@@ -89,7 +122,9 @@ impl UiPerf {
         if self.last_log.elapsed().as_secs() >= 1 {
             let f = self.frames.max(1) as f64;
             eprintln!(
-                "gsplit ui-perf: {} fps · skia draw avg {:.2} ms max {:.2} ms · dirty avg {:.0}% of window · {} full repaints",
+                "gsplit ui-perf [{}x{}]: {} fps · skia draw avg {:.2} ms max {:.2} ms · dirty avg {:.0}% of window · {} full repaints",
+                size.0,
+                size.1,
                 self.frames,
                 self.draw_us_sum as f64 / f / 1000.0,
                 self.draw_us_max as f64 / 1000.0,
@@ -171,6 +206,8 @@ impl super::Surface for WGPUSurface {
             backend,
             ui_perf: RefCell::new(UiPerf::new_if_enabled()),
             frames_since_configure: std::cell::Cell::new(0),
+            compose_hook: RefCell::new(None),
+            inverted_ui_surface: RefCell::new(None),
         })
     }
 
@@ -242,6 +279,82 @@ impl super::Surface for WGPUSurface {
                 })?
             }
         };
+
+        // gsplit Stage 2: inverted mode — the app's compose hook draws this
+        // window's content into the swapchain; Slint's UI (hidden by the app
+        // for inverted windows) renders only into a small persistent offscreen
+        // target so its damage tracking is retired normally. No Skia work
+        // touches the swapchain at all.
+        if self.compose_hook.borrow().is_some() {
+            {
+                let mut off = self.inverted_ui_surface.borrow_mut();
+                let needs_new =
+                    off.as_ref().map_or(true, |(_, s)| *s != (size.width, size.height));
+                if needs_new {
+                    let image_info = skia_safe::ImageInfo::new(
+                        (size.width as i32, size.height as i32),
+                        skia_safe::ColorType::RGBA8888,
+                        skia_safe::AlphaType::Premul,
+                        None,
+                    );
+                    *off = skia_safe::gpu::surfaces::render_target(
+                        gr_context,
+                        skia_safe::gpu::Budgeted::Yes,
+                        &image_info,
+                        None,
+                        skia_safe::gpu::SurfaceOrigin::TopLeft,
+                        None,
+                        false,
+                        None,
+                    )
+                    .map(|s| (s, (size.width, size.height)));
+                }
+                if let Some((ui_surface, _)) = off.as_mut() {
+                    // Persistent target → buffer age 1 (only new damage repaints).
+                    callback(ui_surface.canvas(), Some(gr_context), 1);
+                }
+            }
+            // Retire any texture transitions Slint queued (none expected with
+            // the UI hidden, but stay correct if some UI is visible).
+            let textures_to_transition = self.textures_to_transition_for_sampling.take();
+            if !textures_to_transition.is_empty() {
+                let mut encoder =
+                    self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Skia texture transition encoder"),
+                    });
+                encoder.transition_resources(
+                    std::iter::empty(),
+                    textures_to_transition.iter().map(|texture| wgpu::TextureTransition {
+                        texture,
+                        selector: None,
+                        state: wgpu::TextureUses::RESOURCE,
+                    }),
+                );
+                self.queue.submit(Some(encoder.finish()));
+            }
+            gr_context.submit(None);
+
+            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            {
+                let cfg = self.surface_config.borrow();
+                let ctx = ComposeCtx {
+                    device: &self.device,
+                    queue: &self.queue,
+                    target: &view,
+                    format: cfg.format,
+                    width: cfg.width,
+                    height: cfg.height,
+                };
+                (self.compose_hook.borrow_mut().as_mut().unwrap())(&ctx);
+            }
+
+            if let Some(pre_present_callback) = pre_present_callback.borrow_mut().as_mut() {
+                pre_present_callback();
+            }
+            frame.present();
+            return Ok(());
+        }
+
         let skia_surface = self.backend.make_surface(size, gr_context, &frame);
 
         let mut skia_surface = skia_surface
@@ -262,7 +375,7 @@ impl super::Surface for WGPUSurface {
         let draw_start = std::time::Instant::now();
         let dirty = callback(skia_surface.canvas(), Some(gr_context), age);
         if let Some(perf) = self.ui_perf.borrow_mut().as_mut() {
-            perf.record(draw_start.elapsed().as_micros() as u64, &dirty);
+            perf.record(draw_start.elapsed().as_micros() as u64, &dirty, (size.width, size.height));
         }
 
         let textures_to_transition = self.textures_to_transition_for_sampling.take();

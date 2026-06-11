@@ -62,6 +62,9 @@ pub mod opengl_surface;
 mod wgpu_27_surface;
 #[cfg(feature = "unstable-wgpu-28")]
 mod wgpu_28_surface;
+/// gsplit Stage 2: compose-hook types for inverted windows.
+#[cfg(feature = "unstable-wgpu-28")]
+pub use wgpu_28_surface::{ComposeCtx, ComposeHook};
 
 use i_slint_core::items::{ItemRc, TextWrap};
 use itemrenderer::to_skia_rect;
@@ -822,6 +825,28 @@ impl SkiaRenderer {
         *self.pre_present_callback.borrow_mut() = callback;
     }
 
+    /// gsplit Stage 2 (ui-render-decoupling): install/remove the per-window
+    /// compose hook on the underlying wgpu surface — INVERTED mode, where the
+    /// app composes the window content into the swapchain and Slint's UI only
+    /// retires damage offscreen. Returns false if this renderer's surface
+    /// isn't a wgpu-28 surface (or doesn't exist yet — register after show()).
+    #[cfg(feature = "unstable-wgpu-28")]
+    pub fn set_wgpu_compose_hook(
+        &self,
+        hook: Option<wgpu_28_surface::ComposeHook>,
+    ) -> bool {
+        let surface = self.surface.borrow();
+        let Some(surface) = surface.as_ref() else { return false };
+        let any: &dyn core::any::Any = surface.as_ref();
+        match any.downcast_ref::<wgpu_28_surface::WGPUSurface>() {
+            Some(wgpu_surface) => {
+                wgpu_surface.set_compose_hook(hook);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn partial_rendering_state(&self) -> Option<&PartialRenderingState> {
         // We don't know where the application might render to, so disable partial rendering.
         if self.rendering_notifier.borrow().is_some() {
@@ -1003,7 +1028,9 @@ impl Drop for SkiaRenderer {
 
 /// This trait represents the interface between the Skia renderer and the underlying rendering surface, such as a window
 /// with a metal layer, a wayland window with an OpenGL context, etc.
-pub trait Surface {
+// gsplit: `Any` supertrait so concrete surfaces (WGPUSurface) are reachable
+// for compose-hook registration via downcast.
+pub trait Surface: core::any::Any {
     /// Creates a new surface with the given window, display, and size.
     fn new(
         shared_context: &SkiaSharedContext,

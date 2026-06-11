@@ -707,6 +707,26 @@ pub mod winit_030 {
         winit,
     };
 
+    /// gsplit Stage 2: per-window Skia renderer access + compose-hook types
+    /// for inverted windows (ui-render-decoupling). The skia feature gates at
+    /// this crate level are variant-specific (vulkan/opengl do NOT imply the
+    /// plain `renderer-skia` feature here, unlike in the backend crate).
+    #[cfg(any(
+        feature = "renderer-skia",
+        feature = "renderer-skia-vulkan",
+        feature = "renderer-skia-opengl"
+    ))]
+    pub use i_slint_backend_winit::with_skia_renderer;
+    #[cfg(all(
+        any(
+            feature = "renderer-skia",
+            feature = "renderer-skia-vulkan",
+            feature = "renderer-skia-opengl"
+        ),
+        feature = "unstable-wgpu-28"
+    ))]
+    pub use i_slint_backend_winit::{ComposeCtx, ComposeHook};
+
     #[deprecated(note = "Renamed to `EventResult`")]
     /// Deprecated alias to [`EventResult`]
     pub type WinitWindowEventResult = EventResult;

@@ -199,3 +199,10 @@ impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
         Ok(winit_window)
     }
 }
+
+impl WinitSkiaRenderer {
+    /// gsplit Stage 2: access the inner Skia renderer (compose-hook registration).
+    pub fn skia_renderer(&self) -> &SkiaRenderer {
+        &self.renderer
+    }
+}
