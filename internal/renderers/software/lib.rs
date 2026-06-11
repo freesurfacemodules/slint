@@ -200,11 +200,13 @@ pub trait LineBufferProvider {
 #[cfg(not(cbindgen))]
 const PHYSICAL_REGION_MAX_SIZE: usize = DirtyRegion::MAX_COUNT;
 // cbindgen can't understand associated const correctly, so hardcode the value
+// (gsplit: 8, kept in sync with the raised DirtyRegion::MAX_COUNT — see
+// partial_renderer.rs; the C API is unused in gsplit)
 #[cfg(cbindgen)]
-pub const PHYSICAL_REGION_MAX_SIZE: usize = 3;
+pub const PHYSICAL_REGION_MAX_SIZE: usize = 8;
 const _: () = {
-    assert!(PHYSICAL_REGION_MAX_SIZE == 3);
-    assert!(DirtyRegion::MAX_COUNT == 3);
+    assert!(PHYSICAL_REGION_MAX_SIZE == 8);
+    assert!(DirtyRegion::MAX_COUNT == 8);
 };
 
 /// Represents a rectangular region on the screen, used for partial rendering.

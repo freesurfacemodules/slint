@@ -225,7 +225,12 @@ impl core::fmt::Debug for DirtyRegion {
 
 impl DirtyRegion {
     /// The maximum number of rectangles that can be stored in a DirtyRegion
-    pub const MAX_COUNT: usize = 3;
+    ///
+    /// gsplit: raised from 3 — the app has three live-texture panes (deck A,
+    /// deck B, layer preview) dirty every frame, so at 3 any additional UI
+    /// damage was force-merged into them, ballooning the union toward the
+    /// full window. 8 keeps incidental UI damage in its own rectangles.
+    pub const MAX_COUNT: usize = 8;
 
     /// An iterator over the part of the region (they can overlap)
     pub fn iter(&self) -> impl Iterator<Item = euclid::Box2D<Coord, LogicalPx>> + '_ {

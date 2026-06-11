@@ -33,6 +33,77 @@ pub struct WGPUSurface {
     textures_to_transition_for_sampling: RefCell<Vec<wgpu::Texture>>,
     texture_image_cache: RefCell<HashMap<wgpu::Texture, skia_safe::Image>>,
     backend: Backend,
+    /// gsplit: GSPLIT_UI_PERF=1 aggregate instrumentation (see ui-render-
+    /// decoupling-strategy.md Stage 0).
+    ui_perf: RefCell<Option<UiPerf>>,
+}
+
+/// gsplit Stage-0 measurement: per-second aggregates of Skia draw time and
+/// damage area, logged when GSPLIT_UI_PERF=1. The damage percentage is
+/// self-calibrating: it's relative to the largest dirty area ever observed
+/// (the first frame is always a full repaint), so no scale-factor plumbing
+/// is needed.
+struct UiPerf {
+    last_log: std::time::Instant,
+    frames: u32,
+    full_repaints: u32,
+    draw_us_sum: u64,
+    draw_us_max: u64,
+    dirty_area_sum: f64,
+    max_area: f64,
+}
+
+impl UiPerf {
+    fn new_if_enabled() -> Option<Self> {
+        std::env::var("GSPLIT_UI_PERF").map_or(false, |v| v == "1").then(|| UiPerf {
+            last_log: std::time::Instant::now(),
+            frames: 0,
+            full_repaints: 0,
+            draw_us_sum: 0,
+            draw_us_max: 0,
+            dirty_area_sum: 0.0,
+            max_area: 0.0,
+        })
+    }
+
+    fn record(&mut self, draw_us: u64, dirty: &Option<DirtyRegion>) {
+        self.frames += 1;
+        self.draw_us_sum += draw_us;
+        self.draw_us_max = self.draw_us_max.max(draw_us);
+        match dirty {
+            Some(region) => {
+                let area: f64 = region.iter().map(|b| b.area() as f64).sum();
+                self.max_area = self.max_area.max(area);
+                self.dirty_area_sum += area;
+            }
+            None => {
+                // Renderer reported no region = full repaint.
+                self.full_repaints += 1;
+                self.dirty_area_sum += self.max_area;
+            }
+        }
+        if self.last_log.elapsed().as_secs() >= 1 {
+            let f = self.frames.max(1) as f64;
+            eprintln!(
+                "gsplit ui-perf: {} fps · skia draw avg {:.2} ms max {:.2} ms · dirty avg {:.0}% of window · {} full repaints",
+                self.frames,
+                self.draw_us_sum as f64 / f / 1000.0,
+                self.draw_us_max as f64 / 1000.0,
+                100.0 * self.dirty_area_sum / f / self.max_area.max(1.0),
+                self.full_repaints,
+            );
+            let max_area = self.max_area;
+            *self = UiPerf {
+                last_log: std::time::Instant::now(),
+                frames: 0,
+                full_repaints: 0,
+                draw_us_sum: 0,
+                draw_us_max: 0,
+                dirty_area_sum: 0.0,
+                max_area,
+            };
+        }
+    }
 }
 
 impl super::Surface for WGPUSurface {
@@ -88,6 +159,7 @@ impl super::Surface for WGPUSurface {
             textures_to_transition_for_sampling: RefCell::new(Vec::new()),
             texture_image_cache: RefCell::new(HashMap::new()),
             backend,
+            ui_perf: RefCell::new(UiPerf::new_if_enabled()),
         })
     }
 
@@ -151,7 +223,11 @@ impl super::Surface for WGPUSurface {
         // wgpu doesn't expose EGL_EXT_buffer_age, so assume triple buffering
         // (worst-case for FIFO/AutoVsync). This enables partial rendering to
         // union the last 2 frames' dirty regions instead of repainting everything.
-        callback(skia_surface.canvas(), Some(gr_context), 3);
+        let draw_start = std::time::Instant::now();
+        let dirty = callback(skia_surface.canvas(), Some(gr_context), 3);
+        if let Some(perf) = self.ui_perf.borrow_mut().as_mut() {
+            perf.record(draw_start.elapsed().as_micros() as u64, &dirty);
+        }
 
         let textures_to_transition = self.textures_to_transition_for_sampling.take();
         if !textures_to_transition.is_empty() {
