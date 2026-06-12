@@ -329,7 +329,8 @@ impl super::Surface for WGPUSurface {
                         dimension: wgpu::TextureDimension::D2,
                         format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                            | wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
                     });
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -420,6 +421,62 @@ impl super::Surface for WGPUSurface {
                 self.queue.submit(Some(encoder.finish()));
             }
             gr_context.submit(None);
+
+            // Debug tool (kept from Stage-4 bring-up — it found the opaque
+            // PreviewPane root): GSPLIT_OVERLAY_DEBUG=1 dumps the overlay once
+            // to /tmp/overlay.raw (BGRA, rows padded to 256B). Inspect with:
+            // ffmpeg -f rawvideo -pixel_format bgra -video_size <bpr/4>x<h>
+            //   -i /tmp/overlay.raw -vf crop=<w>:<h>:0:0[,alphaextract] out.png
+            if std::env::var("GSPLIT_OVERLAY_DEBUG").map_or(false, |v| v == "1") {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static DBG: AtomicU32 = AtomicU32::new(0);
+                if DBG.fetch_add(1, Ordering::Relaxed) == 30 {
+                    if let Some(u) = self.inverted_ui.borrow().as_ref() {
+                        let bpr = (u.size.0 * 4).div_ceil(256) * 256;
+                        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("overlay dump"),
+                            size: (bpr * u.size.1) as u64,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        });
+                        let mut enc = self.device.create_command_encoder(&Default::default());
+                        enc.copy_texture_to_buffer(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &u.texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::TexelCopyBufferInfo {
+                                buffer: &buf,
+                                layout: wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(bpr),
+                                    rows_per_image: None,
+                                },
+                            },
+                            wgpu::Extent3d {
+                                width: u.size.0,
+                                height: u.size.1,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                        self.queue.submit(Some(enc.finish()));
+                        let slice = buf.slice(..);
+                        slice.map_async(wgpu::MapMode::Read, |_| {});
+                        let _ = self.device.poll(wgpu::PollType::Wait {
+                            submission_index: None,
+                            timeout: None,
+                        });
+                        let data = slice.get_mapped_range();
+                        std::fs::write("/tmp/overlay.raw", &*data).ok();
+                        eprintln!(
+                            "overlay-debug: dumped {}x{} bpr {} to /tmp/overlay.raw",
+                            u.size.0, u.size.1, bpr
+                        );
+                    }
+                }
+            }
 
             let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
             {
