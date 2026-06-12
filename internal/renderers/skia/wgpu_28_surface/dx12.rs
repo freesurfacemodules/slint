@@ -14,10 +14,10 @@ use wgpu_28 as wgpu;
 pub unsafe fn make_dx12_surface(
     size: PhysicalWindowSize,
     gr_context: &mut skia_safe::gpu::DirectContext,
-    frame: &wgpu::SurfaceTexture,
+    texture: &wgpu::Texture,
 ) -> Option<skia_safe::Surface> {
     unsafe {
-        let dx12_texture = frame.texture.as_hal::<wgpu::wgc::api::Dx12>();
+        let dx12_texture = texture.as_hal::<wgpu::wgc::api::Dx12>();
 
         let texture_info = skia_safe::gpu::d3d::TextureResourceInfo {
             resource: windows_core::Interface::from_raw(windows_core::Interface::into_raw(

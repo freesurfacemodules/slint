@@ -40,13 +40,23 @@ pub struct WGPUSurface {
     /// configured swapchains contain garbage; partial rendering must see
     /// buffer age 0 (= full repaint) until the whole buffer chain was painted.
     frames_since_configure: std::cell::Cell<u32>,
-    /// gsplit Stage 2 (ui-render-decoupling): when set, this window is in
-    /// INVERTED mode — Slint's UI renders only into a small offscreen surface
-    /// (to retire damage; the app hides the UI for inverted windows), and the
-    /// hook composes the window content into the swapchain instead of Skia.
+    /// gsplit Stage 2/3 (ui-render-decoupling): when set, this window is in
+    /// INVERTED mode — Slint's UI renders into a persistent wgpu-texture-backed
+    /// overlay (premultiplied alpha, partial-rendered by damage), and the hook
+    /// composes [content under, UI overlay on top] into the swapchain instead
+    /// of Skia. Inverted windows should use a transparent root background so
+    /// the overlay only covers actual UI.
     compose_hook: RefCell<Option<ComposeHook>>,
-    /// Offscreen Skia target for retiring UI damage in inverted mode.
-    inverted_ui_surface: RefCell<Option<(skia_safe::Surface, (u32, u32))>>,
+    /// The UI overlay: a wgpu texture wrapped as a Skia render target.
+    inverted_ui: RefCell<Option<InvertedUi>>,
+}
+
+/// gsplit: persistent UI-overlay target for an inverted window.
+struct InvertedUi {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    skia: skia_safe::Surface,
+    size: (u32, u32),
 }
 
 /// gsplit: everything the app's compose pass needs to draw one frame of an
@@ -60,6 +70,10 @@ pub struct ComposeCtx<'a> {
     pub format: wgpu::TextureFormat,
     pub width: u32,
     pub height: u32,
+    /// The window's UI overlay (premultiplied alpha; same size as the target),
+    /// to be composited on top of the hook's own content. None until the
+    /// overlay exists (created on the first inverted frame).
+    pub ui: Option<&'a wgpu::TextureView>,
 }
 
 /// gsplit: per-window compose callback (see [`ComposeCtx`]).
@@ -69,7 +83,7 @@ impl WGPUSurface {
     /// gsplit Stage 2: install/remove the compose hook (inverted mode).
     pub fn set_compose_hook(&self, hook: Option<ComposeHook>) {
         if hook.is_none() {
-            self.inverted_ui_surface.borrow_mut().take();
+            self.inverted_ui.borrow_mut().take();
         }
         *self.compose_hook.borrow_mut() = hook;
     }
@@ -207,7 +221,7 @@ impl super::Surface for WGPUSurface {
             ui_perf: RefCell::new(UiPerf::new_if_enabled()),
             frames_since_configure: std::cell::Cell::new(0),
             compose_hook: RefCell::new(None),
-            inverted_ui_surface: RefCell::new(None),
+            inverted_ui: RefCell::new(None),
         })
     }
 
@@ -280,42 +294,79 @@ impl super::Surface for WGPUSurface {
             }
         };
 
-        // gsplit Stage 2: inverted mode — the app's compose hook draws this
-        // window's content into the swapchain; Slint's UI (hidden by the app
-        // for inverted windows) renders only into a small persistent offscreen
-        // target so its damage tracking is retired normally. No Skia work
-        // touches the swapchain at all.
+        // gsplit Stage 2/3: inverted mode — the app's compose hook draws this
+        // window's content into the swapchain; Slint's UI renders into a
+        // persistent wgpu-texture-backed overlay (premultiplied alpha,
+        // partial-rendered by damage) that the hook composites on top. No
+        // Skia work touches the swapchain at all.
         if self.compose_hook.borrow().is_some() {
             {
-                let mut off = self.inverted_ui_surface.borrow_mut();
+                let mut ui = self.inverted_ui.borrow_mut();
                 let needs_new =
-                    off.as_ref().map_or(true, |(_, s)| *s != (size.width, size.height));
+                    ui.as_ref().map_or(true, |u| u.size != (size.width, size.height));
                 if needs_new {
-                    let image_info = skia_safe::ImageInfo::new(
-                        (size.width as i32, size.height as i32),
-                        skia_safe::ColorType::RGBA8888,
-                        skia_safe::AlphaType::Premul,
-                        None,
+                    let format = self.surface_config.borrow().format;
+                    let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("gsplit inverted UI overlay"),
+                        size: wgpu::Extent3d {
+                            width: size.width.max(1),
+                            height: size.height.max(1),
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    // Skia expects color-attachment layout (the wrap below
+                    // declares it); align wgpu's tracked state first.
+                    let mut encoder = self.device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor { label: Some("UI overlay init") },
                     );
-                    *off = skia_safe::gpu::surfaces::render_target(
-                        gr_context,
-                        skia_safe::gpu::Budgeted::Yes,
-                        &image_info,
-                        None,
-                        skia_safe::gpu::SurfaceOrigin::TopLeft,
-                        None,
-                        false,
-                        None,
-                    )
-                    .map(|s| (s, (size.width, size.height)));
+                    encoder.transition_resources(
+                        std::iter::empty(),
+                        std::iter::once(wgpu::TextureTransition {
+                            texture: &texture,
+                            selector: None,
+                            state: wgpu::TextureUses::COLOR_TARGET,
+                        }),
+                    );
+                    self.queue.submit(Some(encoder.finish()));
+                    let skia = self
+                        .backend
+                        .make_surface(size, gr_context, &texture)
+                        .ok_or_else(|| {
+                            PlatformError::from("Failed to wrap UI overlay texture for Skia")
+                        })?;
+                    let mut u =
+                        InvertedUi { texture, view, skia, size: (size.width, size.height) };
+                    u.skia.canvas().clear(skia_safe::Color::TRANSPARENT);
+                    *ui = Some(u);
                 }
-                if let Some((ui_surface, _)) = off.as_mut() {
-                    // Persistent target → buffer age 1 (only new damage repaints).
-                    callback(ui_surface.canvas(), Some(gr_context), 1);
-                }
+                let ui = ui.as_mut().unwrap();
+                // wgpu last tracked the overlay as RESOURCE (sampled by the
+                // previous compose); move it back to color-attachment for Skia.
+                let mut encoder =
+                    self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("UI overlay to color target"),
+                    });
+                encoder.transition_resources(
+                    std::iter::empty(),
+                    std::iter::once(wgpu::TextureTransition {
+                        texture: &ui.texture,
+                        selector: None,
+                        state: wgpu::TextureUses::COLOR_TARGET,
+                    }),
+                );
+                self.queue.submit(Some(encoder.finish()));
+                // Persistent target → buffer age 1 (only new damage repaints).
+                callback(ui.skia.canvas(), Some(gr_context), 1);
             }
-            // Retire any texture transitions Slint queued (none expected with
-            // the UI hidden, but stay correct if some UI is visible).
+            // Transition any textures Slint sampled (imported images in the UI).
             let textures_to_transition = self.textures_to_transition_for_sampling.take();
             if !textures_to_transition.is_empty() {
                 let mut encoder =
@@ -337,6 +388,7 @@ impl super::Surface for WGPUSurface {
             let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
             {
                 let cfg = self.surface_config.borrow();
+                let ui = self.inverted_ui.borrow();
                 let ctx = ComposeCtx {
                     device: &self.device,
                     queue: &self.queue,
@@ -344,6 +396,9 @@ impl super::Surface for WGPUSurface {
                     format: cfg.format,
                     width: cfg.width,
                     height: cfg.height,
+                    // The compose pass samples the overlay through normal wgpu
+                    // usage tracking, which inserts the render→sample barrier.
+                    ui: ui.as_ref().map(|u| &u.view),
                 };
                 (self.compose_hook.borrow_mut().as_mut().unwrap())(&ctx);
             }
@@ -355,7 +410,7 @@ impl super::Surface for WGPUSurface {
             return Ok(());
         }
 
-        let skia_surface = self.backend.make_surface(size, gr_context, &frame);
+        let skia_surface = self.backend.make_surface(size, gr_context, &frame.texture);
 
         let mut skia_surface = skia_surface
             .ok_or_else(|| PlatformError::from("Failed to create Skia surface from WGPU"))?;
@@ -525,19 +580,21 @@ impl Backend {
         }
     }
 
+    // gsplit Stage 3: takes any wgpu texture (not just swapchain frames) so the
+    // inverted path can wrap its UI-overlay texture as a Skia render target.
     fn make_surface(
         &self,
         size: PhysicalWindowSize,
         gr_context: &mut skia_safe::gpu::DirectContext,
-        frame: &wgpu::SurfaceTexture,
+        texture: &wgpu::Texture,
     ) -> Option<skia_safe::Surface> {
         match self {
             #[cfg(target_vendor = "apple")]
-            Self::Metal => unsafe { metal::make_metal_surface(size, gr_context, frame) },
+            Self::Metal => unsafe { metal::make_metal_surface(size, gr_context, texture) },
             #[cfg(target_family = "windows")]
-            Self::Dx12 => unsafe { dx12::make_dx12_surface(size, gr_context, frame) },
+            Self::Dx12 => unsafe { dx12::make_dx12_surface(size, gr_context, texture) },
             #[cfg(all(target_family = "unix", not(target_vendor = "apple")))]
-            Self::Vulkan => unsafe { vulkan::make_vulkan_surface(size, gr_context, frame) },
+            Self::Vulkan => unsafe { vulkan::make_vulkan_surface(size, gr_context, texture) },
         }
     }
 

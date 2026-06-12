@@ -11,10 +11,10 @@ use wgpu_28 as wgpu;
 pub unsafe fn make_metal_surface(
     size: PhysicalWindowSize,
     gr_context: &mut skia_safe::gpu::DirectContext,
-    frame: &wgpu::SurfaceTexture,
+    texture: &wgpu::Texture,
 ) -> Option<skia_safe::Surface> {
     unsafe {
-        let metal_texture = frame.texture.as_hal::<wgpu::wgc::api::Metal>();
+        let metal_texture = texture.as_hal::<wgpu::wgc::api::Metal>();
 
         let texture_info =
             mtl::TextureInfo::new(metal_texture.unwrap().raw_handle().as_ptr() as mtl::Handle);

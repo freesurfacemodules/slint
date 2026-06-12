@@ -11,14 +11,14 @@ use wgpu_28 as wgpu;
 pub unsafe fn make_vulkan_surface(
     size: PhysicalWindowSize,
     gr_context: &mut skia_safe::gpu::DirectContext,
-    frame: &wgpu::SurfaceTexture,
+    texture: &wgpu::Texture,
 ) -> Option<skia_safe::Surface> {
     unsafe {
-        let vulkan_texture = frame.texture.as_hal::<wgpu::wgc::api::Vulkan>();
+        let vulkan_texture = texture.as_hal::<wgpu::wgc::api::Vulkan>();
 
         let alloc = skia_safe::gpu::vk::Alloc::default();
 
-        let (vk_format, color_type) = match frame.texture.format() {
+        let (vk_format, color_type) = match texture.format() {
             wgpu::TextureFormat::Rgba8Unorm => {
                 (skia_safe::gpu::vk::Format::R8G8B8A8_UNORM, skia_safe::ColorType::RGBA8888)
             }
