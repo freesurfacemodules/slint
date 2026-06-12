@@ -51,12 +51,23 @@ pub struct WGPUSurface {
     inverted_ui: RefCell<Option<InvertedUi>>,
 }
 
-/// gsplit: persistent UI-overlay target for an inverted window.
+/// gsplit: persistent UI-overlay target for an inverted window. The TEXTURE
+/// persists (content accumulates across frames); the Skia surface wrapping it
+/// is created FRESH each frame, like the swapchain path does — Slint's
+/// partial renderer applies its dirty-region clip to the canvas, and clips
+/// intersect cumulatively on a reused canvas (two disjoint frames' regions →
+/// empty clip → every draw silently discarded; symptom: UI frozen after the
+/// first paint).
 struct InvertedUi {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
-    skia: skia_safe::Surface,
     size: (u32, u32),
+    /// A fresh overlay holds nothing: the first frame must report buffer
+    /// age 0 (full repaint). The window rendered through the normal path
+    /// before the hook registered, so Slint's items are already clean —
+    /// at age 1 only incremental damage would ever land in the overlay
+    /// (symptom: static UI missing, only per-frame elements visible).
+    fresh: bool,
 }
 
 /// gsplit: everything the app's compose pass needs to draw one frame of an
@@ -322,11 +333,30 @@ impl super::Surface for WGPUSurface {
                         view_formats: &[],
                     });
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    // Skia expects color-attachment layout (the wrap below
-                    // declares it); align wgpu's tracked state first.
+                    // Initialize through wgpu with a real clear pass. Two birds:
+                    // (1) wgpu lazily ZERO-INITIALIZES textures on first tracked
+                    // use — Skia's raw-Vulkan writes are invisible to wgpu, so
+                    // without this the first compose sample would zero-clear the
+                    // overlay, destroying everything Skia painted before it
+                    // (symptom: static UI missing, only per-frame-damaged
+                    // elements visible); (2) the pass leaves the texture in
+                    // color-target state, which Skia's wrap declares.
                     let mut encoder = self.device.create_command_encoder(
                         &wgpu::CommandEncoderDescriptor { label: Some("UI overlay init") },
                     );
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("UI overlay init clear"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
                     encoder.transition_resources(
                         std::iter::empty(),
                         std::iter::once(wgpu::TextureTransition {
@@ -336,16 +366,12 @@ impl super::Surface for WGPUSurface {
                         }),
                     );
                     self.queue.submit(Some(encoder.finish()));
-                    let skia = self
-                        .backend
-                        .make_surface(size, gr_context, &texture)
-                        .ok_or_else(|| {
-                            PlatformError::from("Failed to wrap UI overlay texture for Skia")
-                        })?;
-                    let mut u =
-                        InvertedUi { texture, view, skia, size: (size.width, size.height) };
-                    u.skia.canvas().clear(skia_safe::Color::TRANSPARENT);
-                    *ui = Some(u);
+                    *ui = Some(InvertedUi {
+                        texture,
+                        view,
+                        size: (size.width, size.height),
+                        fresh: true,
+                    });
                 }
                 let ui = ui.as_mut().unwrap();
                 // wgpu last tracked the overlay as RESOURCE (sampled by the
@@ -363,8 +389,18 @@ impl super::Surface for WGPUSurface {
                     }),
                 );
                 self.queue.submit(Some(encoder.finish()));
-                // Persistent target → buffer age 1 (only new damage repaints).
-                callback(ui.skia.canvas(), Some(gr_context), 1);
+                // Fresh Skia wrap each frame (see InvertedUi doc); the texture
+                // content persists, so buffer age 1 (only new damage repaints),
+                // except the first frame after creation (see fresh).
+                let mut skia = self
+                    .backend
+                    .make_surface(size, gr_context, &ui.texture)
+                    .ok_or_else(|| {
+                        PlatformError::from("Failed to wrap UI overlay texture for Skia")
+                    })?;
+                let age = if ui.fresh { 0 } else { 1 };
+                ui.fresh = false;
+                callback(skia.canvas(), Some(gr_context), age);
             }
             // Transition any textures Slint sampled (imported images in the UI).
             let textures_to_transition = self.textures_to_transition_for_sampling.take();
