@@ -508,18 +508,18 @@ impl super::Surface for WGPUSurface {
         let mut skia_surface = skia_surface
             .ok_or_else(|| PlatformError::from("Failed to create Skia surface from WGPU"))?;
 
-        // wgpu doesn't expose EGL_EXT_buffer_age, so assume QUADRUPLE buffering:
-        // Mesa's Wayland WSI is free to allocate 4 images for FIFO chains, and
-        // age=3 under-repainted on such chains (stale-frame flicker on hover
-        // after a UI change). Age 4 unions the last 3 frames' dirty regions —
-        // a superset of what any chain up to 4 buffers needs; requires the
-        // enlarged dirty_region_history in lib.rs.
-        // gsplit: EXCEPT right after a (re)configure — new swapchain buffers
-        // hold garbage, so report age 0 (full repaint) until the whole chain
-        // was painted once (the magenta-on-resize-mouseup bug).
-        let fsc = self.frames_since_configure.get();
-        let age = if fsc >= 4 { 4 } else { 0 };
-        self.frames_since_configure.set(fsc.saturating_add(1));
+        // gsplit: this non-inverted path runs only for windows WITHOUT a
+        // compose hook — i.e. ordinary Slint windows like the Options dialog
+        // (inverted windows take the compose-hook branch above). Those windows
+        // have no live-texture content, so partial rendering buys nothing here
+        // — and across platforms its buffer-age heuristics left unpainted
+        // back-buffer regions showing garbage (intermittent magenta on open /
+        // tab switch, worst on macOS where the swapchain buffer count differs
+        // from the Wayland assumption). Always report buffer age 0 (full
+        // repaint) so every frame paints the whole swapchain. The perf-critical
+        // windows are all inverted and unaffected.
+        let _ = self.frames_since_configure.get();
+        let age = 0;
         let draw_start = std::time::Instant::now();
         let dirty = callback(skia_surface.canvas(), Some(gr_context), age);
         if let Some(perf) = self.ui_perf.borrow_mut().as_mut() {
