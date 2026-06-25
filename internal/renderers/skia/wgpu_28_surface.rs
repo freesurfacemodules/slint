@@ -53,8 +53,8 @@ pub struct WGPUSurface {
     /// true (and the overlay is painted + right-sized), the inverted present
     /// skips repainting the overlay and reuses the cached texture.
     overlay_clean_hint: std::cell::Cell<bool>,
-    /// gsplit L1b: GSPLIT_SKIP_CLEAN=1 enables the clean-frame overlay skip.
-    /// Default off (opt-in) until validated; then flip the default.
+    /// gsplit L1b: skip repainting the overlay on clean frames. Default ON;
+    /// GSPLIT_SKIP_CLEAN=0 disables it (escape hatch, matching the invert flags).
     skip_clean_enabled: bool,
 }
 
@@ -242,7 +242,7 @@ impl super::Surface for WGPUSurface {
             inverted_ui: RefCell::new(None),
             overlay_clean_hint: std::cell::Cell::new(false),
             skip_clean_enabled: std::env::var("GSPLIT_SKIP_CLEAN")
-                .map_or(false, |v| v == "1"),
+                .map_or(true, |v| v != "0"),
         })
     }
 
