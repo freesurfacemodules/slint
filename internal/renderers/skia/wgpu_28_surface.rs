@@ -401,7 +401,17 @@ impl super::Surface for WGPUSurface {
                     })?;
                 let age = if ui.fresh { 0 } else { 1 };
                 ui.fresh = false;
-                callback(skia.canvas(), Some(gr_context), age);
+                // gsplit perf: record the overlay paint (draw time + dirty
+                // region) so the inverted path reports the same ui-perf line as
+                // the non-inverted one. Answers "does anything re-dirty the UI
+                // every frame once a layer exists?" — dirty avg ~0% + 0 full
+                // repaints means Slint elides the paint and the per-frame cost
+                // is just present machinery.
+                let draw_start = std::time::Instant::now();
+                let dirty = callback(skia.canvas(), Some(gr_context), age);
+                if let Some(perf) = self.ui_perf.borrow_mut().as_mut() {
+                    perf.record(draw_start.elapsed().as_micros() as u64, &dirty, (size.width, size.height));
+                }
             }
             // Transition any textures Slint sampled (imported images in the UI).
             let textures_to_transition = self.textures_to_transition_for_sampling.take();

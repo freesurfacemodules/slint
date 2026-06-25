@@ -809,6 +809,14 @@ impl PartialRenderingState {
         self.force_dirty.replace_with(|r| r.union(&region));
     }
 
+    /// gsplit: true if there is explicit/forced damage pending for the next
+    /// frame (the `mark_dirty_region` / `force_screen_refresh` channel, e.g.
+    /// popups). Complements the window's property `redraw_tracker`; both must be
+    /// clean for the inverted present to safely skip Slint's render().
+    pub fn has_forced_dirty(&self) -> bool {
+        self.force_screen_refresh.get() || self.force_dirty.borrow().iter().next().is_some()
+    }
+
     /// Call this from your renderer's `free_graphics_resources` function to ensure that the cached item geometries
     /// are cleared for the destroyed items in the item tree.
     pub fn free_graphics_resources(&self, items: &mut dyn Iterator<Item = Pin<ItemRef<'_>>>) {

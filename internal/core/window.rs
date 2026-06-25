@@ -1129,6 +1129,16 @@ impl WindowInner {
         ))
     }
 
+    /// gsplit: true if any property the render reads has changed since the last
+    /// render (i.e. re-rendering would produce different output). This is the
+    /// property-change damage channel; the renderer also has a `mark_dirty_region`
+    /// channel (popups/explicit). Used to decide whether the inverted present can
+    /// skip Slint's render() and reuse the cached overlay. A forced
+    /// `request_redraw()` (e.g. to present new video) does NOT set this.
+    pub fn is_render_dirty(&self) -> bool {
+        self.pinned_fields.as_ref().project_ref().redraw_tracker.is_dirty()
+    }
+
     /// Registers the window with the windowing system, in order to render the component's items and react
     /// to input events once the event loop spins.
     pub fn show(&self) -> Result<(), PlatformError> {

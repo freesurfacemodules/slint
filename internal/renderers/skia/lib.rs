@@ -581,6 +581,39 @@ impl SkiaRenderer {
         let window_adapter = self.window_adapter()?;
         let window = window_adapter.window();
 
+        // gsplit dirty-signal validation (GSPLIT_DIRTY_LOG=1): per-frame, would
+        // the L1b skip fire? CLEAN = no property damage (redraw_tracker) AND no
+        // forced damage (mark_dirty_region/refresh). Logs the clean/dirty split
+        // every ~1s so manual interaction (resize, select, theme, hover) can be
+        // checked against forced content-only redraws. Measurement only.
+        if std::env::var("GSPLIT_DIRTY_LOG").map_or(false, |v| v == "1") {
+            thread_local! {
+                static DL: std::cell::RefCell<(u64, u64, std::time::Instant)> =
+                    std::cell::RefCell::new((0, 0, std::time::Instant::now()));
+            }
+            let prop_dirty =
+                i_slint_core::window::WindowInner::from_pub(window).is_render_dirty();
+            let force_dirty = self
+                .partial_rendering_state
+                .as_ref()
+                .map_or(false, |s| s.has_forced_dirty());
+            let clean = !prop_dirty && !force_dirty;
+            DL.with(|d| {
+                let mut d = d.borrow_mut();
+                d.0 += 1;
+                if clean {
+                    d.1 += 1;
+                }
+                if d.2.elapsed().as_secs() >= 1 {
+                    eprintln!(
+                        "gsplit dirty-log: {}/{} renders CLEAN (skippable) · {} dirty (prop={} force-seen)",
+                        d.1, d.0, d.0 - d.1, if prop_dirty { "y" } else { "n" }
+                    );
+                    *d = (0, 0, std::time::Instant::now());
+                }
+            });
+        }
+
         surface.render(
             window,
             surface_size,
