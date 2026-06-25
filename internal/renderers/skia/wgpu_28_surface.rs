@@ -49,6 +49,13 @@ pub struct WGPUSurface {
     compose_hook: RefCell<Option<ComposeHook>>,
     /// The UI overlay: a wgpu texture wrapped as a Skia render target.
     inverted_ui: RefCell<Option<InvertedUi>>,
+    /// gsplit L1b: set per frame from the renderer's `note_render_clean`. When
+    /// true (and the overlay is painted + right-sized), the inverted present
+    /// skips repainting the overlay and reuses the cached texture.
+    overlay_clean_hint: std::cell::Cell<bool>,
+    /// gsplit L1b: GSPLIT_SKIP_CLEAN=1 enables the clean-frame overlay skip.
+    /// Default off (opt-in) until validated; then flip the default.
+    skip_clean_enabled: bool,
 }
 
 /// gsplit: persistent UI-overlay target for an inverted window. The TEXTURE
@@ -233,11 +240,18 @@ impl super::Surface for WGPUSurface {
             frames_since_configure: std::cell::Cell::new(0),
             compose_hook: RefCell::new(None),
             inverted_ui: RefCell::new(None),
+            overlay_clean_hint: std::cell::Cell::new(false),
+            skip_clean_enabled: std::env::var("GSPLIT_SKIP_CLEAN")
+                .map_or(false, |v| v == "1"),
         })
     }
 
     fn name(&self) -> &'static str {
         "wgpu"
+    }
+
+    fn note_render_clean(&self, clean: bool) {
+        self.overlay_clean_hint.set(clean);
     }
 
     fn resize_event(&self, size: PhysicalWindowSize) -> Result<(), PlatformError> {
@@ -311,6 +325,21 @@ impl super::Surface for WGPUSurface {
         // partial-rendered by damage) that the hook composites on top. No
         // Skia work touches the swapchain at all.
         if self.compose_hook.borrow().is_some() {
+            // gsplit L1b: on a clean frame (renderer reported no property/forced
+            // damage) skip repainting the overlay — reuse the cached, already-
+            // painted texture and run only the compose hook + present below.
+            // Requires the overlay to exist, be painted (not fresh), and match
+            // the current size; any damage / resize / first paint takes the full
+            // repaint path. The repaint block below keeps its original
+            // indentation under this guard to minimize the diff.
+            let do_skip = self.skip_clean_enabled
+                && self.overlay_clean_hint.get()
+                && self
+                    .inverted_ui
+                    .borrow()
+                    .as_ref()
+                    .map_or(false, |u| !u.fresh && u.size == (size.width, size.height));
+            if !do_skip {
             {
                 let mut ui = self.inverted_ui.borrow_mut();
                 let needs_new =
@@ -431,6 +460,7 @@ impl super::Surface for WGPUSurface {
                 self.queue.submit(Some(encoder.finish()));
             }
             gr_context.submit(None);
+            } // end `if !do_skip` — L1b clean-frame overlay-repaint skip
 
             // Debug tool (kept from Stage-4 bring-up — it found the opaque
             // PreviewPane root): GSPLIT_OVERLAY_DEBUG=1 dumps the overlay once

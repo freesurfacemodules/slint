@@ -581,27 +581,28 @@ impl SkiaRenderer {
         let window_adapter = self.window_adapter()?;
         let window = window_adapter.window();
 
-        // gsplit dirty-signal validation (GSPLIT_DIRTY_LOG=1): per-frame, would
-        // the L1b skip fire? CLEAN = no property damage (redraw_tracker) AND no
-        // forced damage (mark_dirty_region/refresh). Logs the clean/dirty split
-        // every ~1s so manual interaction (resize, select, theme, hover) can be
-        // checked against forced content-only redraws. Measurement only.
+        // gsplit L1b: would re-rendering produce different output this frame?
+        // CLEAN = no property damage (redraw_tracker) AND no forced damage
+        // (mark_dirty_region/refresh). Pass it to the surface so the inverted
+        // present can skip repainting the overlay on clean frames. A forced
+        // content-only request_redraw (e.g. new video) does NOT mark either
+        // channel, so it reads clean.
+        let prop_dirty = i_slint_core::window::WindowInner::from_pub(window).is_render_dirty();
+        let force_dirty =
+            self.partial_rendering_state.as_ref().map_or(false, |s| s.has_forced_dirty());
+        let render_clean = !prop_dirty && !force_dirty;
+        surface.note_render_clean(render_clean);
+
+        // GSPLIT_DIRTY_LOG=1: log the clean/dirty split every ~1s (validation).
         if std::env::var("GSPLIT_DIRTY_LOG").map_or(false, |v| v == "1") {
             thread_local! {
                 static DL: std::cell::RefCell<(u64, u64, std::time::Instant)> =
                     std::cell::RefCell::new((0, 0, std::time::Instant::now()));
             }
-            let prop_dirty =
-                i_slint_core::window::WindowInner::from_pub(window).is_render_dirty();
-            let force_dirty = self
-                .partial_rendering_state
-                .as_ref()
-                .map_or(false, |s| s.has_forced_dirty());
-            let clean = !prop_dirty && !force_dirty;
             DL.with(|d| {
                 let mut d = d.borrow_mut();
                 d.0 += 1;
-                if clean {
+                if render_clean {
                     d.1 += 1;
                 }
                 if d.2.elapsed().as_secs() >= 1 {
@@ -1111,6 +1112,13 @@ pub trait Surface: core::any::Any {
     fn use_partial_rendering(&self) -> bool {
         false
     }
+
+    /// gsplit: hint from the renderer, called before `render()`, that the UI is
+    /// clean this frame (no property `redraw_tracker` damage AND no forced
+    /// `mark_dirty_region`/refresh). The inverted-presentation surface uses it to
+    /// skip repainting the overlay and reuse the cached texture (compose+present
+    /// still run). Default: ignored.
+    fn note_render_clean(&self, _clean: bool) {}
 
     fn import_opengl_texture(
         &self,
